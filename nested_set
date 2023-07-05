@@ -1,0 +1,82 @@
+CREATE TABLE public.ns_tree (
+	id serial4 NOT NULL,
+	"name" varchar(50) NOT NULL,
+	lft int8 NOT NULL,
+	rgt int8 NOT NULL,
+	"level" int8 NOT NULL,
+	CONSTRAINT ns_tree_pkey PRIMARY KEY (id)
+);
+CREATE INDEX nslrl_idx ON public.ns_tree USING btree (lft, rgt, level);
+
+INSERT INTO public.ns_tree ("name",lft,rgt,"level") VALUES
+	 ('VEGETABLE',2,7,1),
+	 ('POTATO',3,4,2),
+	 ('TOMATO',5,6,2),
+	 ('FOOD',1,24,0),
+	 ('SEA FOOD',8,11,1),
+	 ('FRUIT',12,21,1),
+	 ('ORANGE',19,20,2),
+	 ('OMAR',9,10,2),
+	 ('BANANA',17,18,2),
+	 ('ANANAS',15,16,2),
+	 ('APPLE',13,14,2);
+
+CREATE OR REPLACE FUNCTION public.read_nested_tree(parent_id integer DEFAULT 1)
+ RETURNS TABLE(id integer, name character varying, level bigint)
+ LANGUAGE plpgsql
+AS $function$
+	begin
+		return query 
+		SELECT node.id, node.name, node.level
+			FROM ns_tree AS node,
+			ns_tree AS parent
+			WHERE node.lft BETWEEN parent.lft AND parent.rgt
+			AND parent.id = parent_id
+			ORDER BY node.lft;
+	end;$function$
+;
+
+CREATE OR REPLACE FUNCTION public.add_node_ltree_tree(node_name character varying, node_id integer)
+ RETURNS integer
+ LANGUAGE plpgsql
+AS $function$
+	declare
+		tab ltree_tree%rowtype;
+	    _PATH ltree;
+	   	_Id int4;
+	begin
+		select * into tab
+		from ltree_tree lt
+		where lt.path ~ concat('*.', node_id::text, '.*')::lquery;
+		_PATH := tab.path;
+	
+		insert into ltree_tree (name) values(node_name) returning id into _Id;
+		update ltree_tree set "path" = concat(_PATH, '.', _Id)::ltree where id = _Id;
+	
+	return _Id;
+	end;$function$
+;
+
+
+CREATE OR REPLACE FUNCTION public.drop_node_nested_tree(node_id integer)
+ RETURNS integer
+ LANGUAGE plpgsql
+AS $function$
+	declare
+		tab ns_tree%rowtype;
+		_RGT int8;
+		_LFT int8;
+		_WDT int8;
+		_Id int4;
+	begin
+		SELECT * into tab FROM ns_tree WHERE id = node_id;
+		_RGT := tab.rgt;
+		_LFT := tab.lft;
+		_WDT := tab.rgt - tab.lft + 1;
+		
+		delete from ns_tree where lft between _LFT and _RGT returning id into _Id;
+      	update ns_tree set lft = lft - _WDT	where lft > _RGT;
+		update ns_tree set rgt = rgt - _WDT	where rgt > _RGT;
+		return _Id;
+	end;$function$
+;
