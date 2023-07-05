@@ -1,0 +1,62 @@
+create table ltree_tree (
+	id serial primary key,
+	path ltree,
+	name varchar(50)
+)
+
+insert into ltree_tree values(1, '1', 'FOOD');
+insert into ltree_tree values(2, '1.2', 'VEGETABLE');
+insert into ltree_tree values(3, '1.2.3', 'POTATO');
+insert into ltree_tree values(4, '1.2.4', 'TOMATO');
+insert into ltree_tree values(5, '1.5', 'FRUIT');
+insert into ltree_tree values(6, '1.5.6', 'APPLE');
+insert into ltree_tree values(7, '1.5.7', 'BANANA');
+
+
+CREATE INDEX ltree_tree_path_gist_idx ON ltree_tree USING GIST (path);
+
+CREATE OR REPLACE FUNCTION read_ltree_tree(parent_id integer DEFAULT 1)
+ RETURNS TABLE(id int4, "path" ltree, "name" varchar(50))
+ LANGUAGE plpgsql
+AS $$
+	begin
+		return query 
+		select lt.id, subpath(lt.path, index(lt.path,'2')), lt.name
+		from ltree_tree lt
+		where lt.path ~ concat('*.', parent_id::text, '.*')::lquery;
+	end;$$
+;
+
+CREATE OR REPLACE FUNCTION add_node_ltree_tree(node_name character varying, node_id integer)
+ RETURNS integer
+ LANGUAGE plpgsql
+AS $function$
+	declare
+		tab ltree_tree%rowtype;
+	    _PATH ltree;
+	   	_Id int4;
+	begin
+		select * into tab
+		from ltree_tree lt
+		where lt.path ~ concat('*.', node_id::text, '.*')::lquery;
+		_PATH := tab.path;
+	
+		insert into ltree_tree (name) values(node_name) returning id into _Id;
+		update ltree_tree set "path" = concat(_PATH, '.', _Id)::ltree where id = _Id;
+	
+	return _Id;
+	end;$function$
+;
+
+CREATE OR REPLACE FUNCTION drop_node_ltree_tree(node_id integer)
+ RETURNS void
+ LANGUAGE plpgsql
+AS $function$
+	declare
+		tab ns_tree%rowtype;
+		_Id int4;
+	begin
+		delete from ltree_tree 
+		where id in (select t.id from read_ltree_tree(9) as t);
+	end;$function$
+;
