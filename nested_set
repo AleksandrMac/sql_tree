@@ -36,27 +36,84 @@ AS $function$
 	end;$function$
 ;
 
-CREATE OR REPLACE FUNCTION public.add_node_ltree_tree(node_name character varying, node_id integer)
+CREATE OR REPLACE FUNCTION public.add_node_ns_tree_tf()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+	declare
+		tab ns_tree%rowtype;
+	begin		
+		if new.lft is null then		
+			raise exception 'левая граница не может быть пустой';
+		end if;			
+	
+		SELECT * into tab FROM ns_tree WHERE lft = new.lft - 1 or rgt = new.lft - 1;
+		new.rgt := new.lft + 1;
+		case (new.lft -1)
+			when tab.lft then 
+				new.level := tab.level + 1;
+			when tab.rgt then 
+				new.level := tab.level;
+		end case;			
+	
+		UPDATE ns_tree SET rgt = rgt + 2 WHERE rgt >= new.lft;
+		UPDATE ns_tree SET lft = lft + 2 WHERE lft >= new.lft;
+		return new;
+	end;
+$function$
+;
+
+create trigger add_node_ns_tree before
+insert
+    on
+    public.ns_tree for each row execute function add_node_ns_tree_tf();
+
+CREATE TYPE public."node_position" AS ENUM (
+	'child',
+	'left',
+	'right');
+
+CREATE OR REPLACE FUNCTION public.add_node_nested_tree(node_name character varying, node_id integer, np node_position DEFAULT 'child'::node_position)
  RETURNS integer
  LANGUAGE plpgsql
 AS $function$
 	declare
-		tab ltree_tree%rowtype;
-	    _PATH ltree;
+		tab ns_tree%rowtype;
+	    _RGT int8; 
+	    _LFT int8; 
+	    _LVL int8;
 	   	_Id int4;
 	begin
-		select * into tab
-		from ltree_tree lt
-		where lt.path ~ concat('*.', node_id::text, '.*')::lquery;
-		_PATH := tab.path;
+		SELECT * into tab FROM ns_tree WHERE id = node_id;
+		_RGT := tab.rgt;
+		_LFT := tab.lft;
+		_LVL := tab.level;
 	
-		insert into ltree_tree (name) values(node_name) returning id into _Id;
-		update ltree_tree set "path" = concat(_PATH, '.', _Id)::ltree where id = _Id;
+		if np = 'child' then
+			UPDATE ns_tree SET rgt = rgt + 2 WHERE rgt >= _RGT;
+			UPDATE ns_tree SET lft = lft + 2 WHERE lft > _RGT;		
+			
+			_LFT := _RGT;
+			_RGT := _LFT + 1;
+			_LVL := _LVL + 1;
+		elseif np = 'left' then
+			UPDATE ns_tree SET rgt = rgt + 2 WHERE rgt >= _RGT;
+			UPDATE ns_tree SET lft = lft + 2 WHERE lft >= _LFT;	
+		elseif np = 'right' then
+			UPDATE ns_tree SET rgt = rgt + 2 WHERE rgt > _RGT;
+			UPDATE ns_tree SET lft = lft + 2 WHERE lft >= _RGT;		
+			
+			_LFT := _RGT + 1;
+			_RGT := _LFT + 1;
+		else 
+			return -1;
+		end if;	
+	
+		INSERT INTO ns_tree(name,lft,rgt,level)	VALUES(node_name, _LFT, _RGT, _LVL) returning id into _Id;
 	
 	return _Id;
 	end;$function$
 ;
-
 
 CREATE OR REPLACE FUNCTION public.drop_node_nested_tree(node_id integer)
  RETURNS integer
@@ -80,3 +137,90 @@ AS $function$
 		return _Id;
 	end;$function$
 ;
+
+CREATE OR REPLACE FUNCTION public.drop_node_ns_tree_tf()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+	begin
+		perform drop_node_nested_tree(old.id);
+		return NULL;
+	end;
+$function$
+;
+
+create trigger drop_node_ns_tree before
+delete
+    on
+    public.ns_tree for each row
+    when ((pg_trigger_depth() < 1)) execute function drop_node_ns_tree_tf();
+
+create or replace function rebase_node_ns_tree_tf() returns trigger as $rebase_node$
+	declare
+		tab ns_tree%rowtype;
+		_len int4;
+		_offset int4;
+		_newTopLevel int8;
+		_levelOffset int4;
+	begin
+		if new.rgt <> old.rgt then
+			raise exception 'перебазирование узла дерева возможно только по левой границе';
+		elsif new.lft = old.lft then
+			return new;
+		end if;
+	
+		if new.lft between old.lft and old.rgt then 
+			raise exception 'нельзя перемещать узел внутрь себя';
+		end if;
+	
+		SELECT * into tab FROM ns_tree WHERE id = new.id;
+	
+		CREATE TEMPORARY table _oldNode (like ns_tree) ON COMMIT DROP;
+		INSERT INTO _oldNode SELECT * FROM ns_tree WHERE lft > old.lft and rgt <= old.rgt;
+	
+		select case 
+			when lft = new.lft -1 then level + 1
+			when rgt = new.lft -1 then level
+			end
+		into _newTopLevel from ns_tree 
+		where lft = new.lft-1 or rgt = new.lft-1;
+	
+		new.level := _newTopLevel;
+	
+		_len := old.rgt - old.lft + 1;
+		_offset := new.lft - old.lft;
+		_levelOffset := _newTopLevel - old.level;
+		
+		case
+			when _offset > 0 then
+				new.lft := old.lft + _offset - _len;
+				new.rgt := old.rgt + _offset - _len;
+				_offset := new.lft - old.lft;
+			
+				UPDATE ns_tree SET lft = lft - _len WHERE lft > old.lft and lft < new.lft + _len;
+				UPDATE ns_tree SET rgt = rgt - _len WHERE rgt > old.rgt and rgt <= new.rgt;
+			when _offset < 0 then
+				new.rgt := old.rgt + _offset;
+			
+				UPDATE ns_tree SET lft = lft + _len WHERE lft >= new.lft and lft < old.lft;
+				UPDATE ns_tree SET rgt = rgt + _len WHERE rgt > new.rgt - _len and rgt < old.rgt;				
+		end case;
+	
+		FOR tab in select * from _oldNode loop
+			update ns_tree set 
+		   		lft = tab.lft + _offset, 
+		   		rgt = tab.rgt + _offset, 
+		   		level = level + _levelOffset 
+		   	where id = tab.id;
+		END LOOP;
+		return new;	
+	end;
+$rebase_node$ language plpgsql;
+
+create trigger rebase_node_ns_tree before
+update
+    on
+    public.ns_tree for each row
+    when ((pg_trigger_depth() < 1)) execute function rebase_node_ns_tree_tf();
+
+
