@@ -173,8 +173,6 @@ create or replace function rebase_node_ns_tree_tf() returns trigger as $rebase_n
 			raise exception 'нельзя перемещать узел внутрь себя';
 		end if;
 	
-		SELECT * into tab FROM ns_tree WHERE id = new.id;
-	
 		CREATE TEMPORARY table _oldNode (like ns_tree) ON COMMIT DROP;
 		INSERT INTO _oldNode SELECT * FROM ns_tree WHERE lft > old.lft and rgt <= old.rgt;
 	
