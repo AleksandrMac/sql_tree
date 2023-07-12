@@ -48,6 +48,30 @@ AS $function$
 	end;$function$
 ;
 
+CREATE OR REPLACE FUNCTION public.add_node_ltree_tree_tf()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+	declare
+		tab ltree_tree%rowtype;
+	begin
+		if new.path is null or new.path = '' then
+			raise exception 'path не может быть пустым';
+		end if;
+		
+		select * into tab from ltree_tree where path ~ concat('*.', new.path::text)::lquery;
+		new.path := concat(tab.path, '.', new.id)::ltree;
+		return new;
+	end;
+$function$
+;
+
+create trigger add_node_ltree_tree before
+insert
+    on
+    public.ltree_tree for each row execute function add_node_ltree_tree_tf();
+
+
 CREATE OR REPLACE FUNCTION drop_node_ltree_tree(node_id integer)
  RETURNS void
  LANGUAGE plpgsql
@@ -60,3 +84,64 @@ AS $function$
 		where id in (select t.id from read_ltree_tree(9) as t);
 	end;$function$
 ;
+
+CREATE OR REPLACE FUNCTION public.drop_node_ltree_tree_tf()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+	declare
+		tab ltree_tree%rowtype;
+	begin
+		delete from ltree_tree where path ~ concat('*.',old.id, '.*')::lquery;
+		return new;
+	end;
+$function$
+;
+
+create trigger drop_node_ltree_tree before
+delete
+    on
+    public.ltree_tree for each row
+    when ((pg_trigger_depth() < 1)) execute function drop_node_ltree_tree_tf();
+
+
+CREATE OR REPLACE FUNCTION public.rebase_node_ltree_tree_tf()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+	declare
+		tab ltree_tree%rowtype;
+		s text;
+	begin
+		if new.path is null or new.path = '' then
+			raise exception 'path не может быть пустым';
+		end if;
+		
+		select * into tab from ltree_tree where path ~ concat('*.', new.path::text)::lquery;
+	
+		if old.path @> tab.path then
+			raise exception 'обнаружено зацикливание';
+		end if;
+		
+		new.path := concat(tab.path, '.', new.id)::ltree;
+		
+		for tab in select * from ltree_tree where path ~ concat(old.path::text, '.*')::lquery
+		loop 
+			continue when tab.id = old.id;
+			update ltree_tree 
+			set path = replace(tab.path::text, old.path::text, new.path::text)::ltree
+			where id = tab.id;
+		end loop;
+		return new;	
+	end;
+$function$
+;
+
+create trigger rebase_node_ltree_tree before
+update
+    on
+    public.ltree_tree for each row
+    when ((pg_trigger_depth() < 1)) execute function rebase_node_ltree_tree_tf();
+
+
+
